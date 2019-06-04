@@ -1,0 +1,5 @@
+theme: jekyll-theme-slate
+title: AQL-WebService
+description: AQL-WebService wrapper for AQL-Systems
+show_downloads: true
+logo: https://foellix.github.io/AQL-System/logo.png
