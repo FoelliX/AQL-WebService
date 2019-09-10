@@ -63,7 +63,7 @@ When the AQL-WebService is up and running the following commands can be used to 
 
 ## Publications
 - *Together Strong: Cooperative Android App Analysis* (Felix Pauck, Heike Wehrheim)  
-t.b.a.
+ESEC/FSE 2019 [https://dl.acm.org/citation.cfm?id=3338915](https://dl.acm.org/citation.cfm?id=3338915)
 
 ## License
 The AQL-WebService is licensed under the *GNU General Public License v3* (see [LICENSE](https://github.com/FoelliX/AQL-WebService/blob/master/LICENSE)).
