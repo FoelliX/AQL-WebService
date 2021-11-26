@@ -100,4 +100,4 @@ fpauck@mail.uni-paderborn.de
 - CoDiDroid, an analysis tool network build out of AQL-WebServices: [https://github.com/FoelliX/CoDiDroid](https://github.com/FoelliX/CoDiDroid)
 - AQL-System, the system wrapped in AQL-WebServices, which can also be used as a frontend interface: [https://github.com/FoelliX/AQL-System](https://github.com/FoelliX/AQL-System)
 - BREW, a frontend implementation for benchmark execution: [https://github.com/FoelliX/BREW](https://github.com/FoelliX/BREW)
-- AQL-Online, a website which can be used as frontend, too.
+- [AQL-Online](https://github.com/FoelliX/AQL-Online), a website which can be used as frontend, too.
