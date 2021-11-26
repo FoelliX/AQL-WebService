@@ -1,44 +1,41 @@
 package de.foellix.aql.webservice.scheduler;
 
 import java.io.File;
+import java.util.List;
 
+import de.foellix.aql.helper.KeywordsAndConstantsHelper;
 import de.foellix.aql.webservice.helper.Helper;
 
-public class PreprocessTask {
-	final int id;
-	final String keyword;
-	final File target;
-	String status;
+public class PreprocessTask extends Task {
+	private final String keyword;
+	private final List<File> target;
 
-	public PreprocessTask(String keyword, File target, int id) {
-		this.id = id;
+	public PreprocessTask(String keyword, List<File> target, int id) {
+		super(id);
 		this.keyword = keyword;
 		this.target = target;
-		this.status = "In Queue";
 	}
 
 	public String createQuery() {
-		return "Permissions IN App('" + this.target.getAbsolutePath() + "' | '" + this.keyword + "') FEATURING '"
-				+ Helper.getFakeToolForPreprocessing().getName() + "' ?";
-	}
+		final StringBuilder sb = new StringBuilder();
 
-	public int getId() {
-		return this.id;
+		for (final File app : this.target) {
+			if (!sb.isEmpty()) {
+				sb.append(", ");
+			}
+			sb.append(app.getAbsolutePath());
+		}
+
+		return KeywordsAndConstantsHelper.SOI_ARGUMENTS + " IN App('" + sb.toString() + "' | '" + this.keyword
+				+ "') USES '" + Helper.getFakeToolForPreprocessing(this.keyword).getName() + "-"
+				+ Helper.getFakeToolForPreprocessing(this.keyword).getVersion() + "' !";
 	}
 
 	public String getKeyword() {
 		return this.keyword;
 	}
 
-	public File getTarget() {
+	public List<File> getTarget() {
 		return this.target;
-	}
-
-	public String getStatus() {
-		return this.status;
-	}
-
-	public void setStatus(String status) {
-		this.status = status;
 	}
 }

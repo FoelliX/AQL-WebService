@@ -14,9 +14,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import de.foellix.aql.Log;
 import de.foellix.aql.config.ConfigHandler;
 import de.foellix.aql.datastructure.Answer;
-import de.foellix.aql.system.Storage;
-import de.foellix.aql.system.task.ITaskHook;
-import de.foellix.aql.system.task.OperatorTask;
+import de.foellix.aql.system.AQLSystem;
+import de.foellix.aql.system.Options;
 import de.foellix.aql.ui.cli.OutputWriter;
 import de.foellix.aql.webservice.config.Config;
 import de.foellix.aql.webservice.helper.Helper;
@@ -26,7 +25,7 @@ public class WebScheduler {
 
 	private Queue<QueryTask> queue;
 	private Map<Integer, QueryTask> mapDone;
-	private de.foellix.aql.system.System aqlSystem;
+	private AQLSystem aqlSystem;
 	private OutputWriter outputWriter;
 
 	List<QueryTask> queryBuffer;
@@ -53,34 +52,24 @@ public class WebScheduler {
 		this.mapDone = new HashMap<>();
 
 		// Setup AQL-System
-		OperatorTask.setTempDirectory(new File(Config.getInstance().getProperty(Config.TEMP_PATH)));
-		new File(Config.getInstance().getProperty(Config.STORAGE_PATH)).mkdirs();
-		Storage.getInstance().setDifferentStorageLocation(Config.getInstance().getProperty(Config.STORAGE_PATH));
-		File configFile = ConfigHandler.getInstance().getConfigFile();
-		if (!configFile.exists()) {
-			if (ConfigHandler.getInstance().getConfigFile() != null
-					&& !ConfigHandler.getInstance().getConfigFile().equals("")
-					&& !ConfigHandler.getInstance().getConfigFile().equals(" ")) {
-				Log.warning("Could not find/read desired config file: " + configFile.getAbsolutePath());
-			}
-			try {
-				configFile = new File("config.xml");
-			} catch (final Exception e) {
-				Log.error("Could not find/read default config file.");
-				return;
-			}
-		}
-		ConfigHandler.getInstance().setConfig(configFile);
-		this.aqlSystem = new de.foellix.aql.system.System();
-		this.aqlSystem.setStoreAnswers(false);
-		new File(Config.getInstance().getProperty(Config.ANSWERS_PATH)).mkdirs();
-		this.aqlSystem.getScheduler().setTimeout(Helper.getTimeOutByConfig());
-		this.aqlSystem.getScheduler()
-				.setAlwaysPreferLoading(Boolean.valueOf(Config.getInstance().getProperty(Config.PREFER_LOADING)));
+		final Options options = new Options();
+		options.setStoreAnswers(false);
+		options.setTimeout(Helper.getTimeOutByConfig());
+		this.aqlSystem = new AQLSystem(options);
 	}
 
 	public static WebScheduler getInstance() {
 		return instance;
+	}
+
+	public void scheduleTask(QueryTask task) {
+		if (!this.running) {
+			new Thread(() -> {
+				queryNextTask(task);
+			}).start();
+		} else {
+			this.queue.add(task);
+		}
 	}
 
 	public void queryNextTask(QueryTask task) {
@@ -88,28 +77,29 @@ public class WebScheduler {
 		this.mapDone.put(task.getId(), task);
 
 		// Ask AQL-System
-		task.setStatus("In Progress");
+		task.setStatus(Task.IN_PROGRESS);
 		if (this.outputWriter != null) {
 			this.aqlSystem.getAnswerReceivers().remove(this.outputWriter);
 		}
 		this.outputWriter = new OutputWriter(
 				new File(Config.getInstance().getProperty(Config.ANSWERS_PATH), "answer_" + task.getId() + ".xml"));
 		this.aqlSystem.getAnswerReceivers().add(this.outputWriter);
-		this.aqlSystem.queryAndWait(task.getQuery()).iterator().next();
-		task.setStatus("Done");
+		this.aqlSystem.queryAndWait(task.getQuery());
+		task.setStatus(Task.DONE);
 
 		// Next task
-		if (!this.queue.isEmpty() && this.aqlSystem.getScheduler().getWaiting() <= 0) {
+		if (!this.queue.isEmpty() && !this.aqlSystem.isRunning()) {
 			queryNextTask(this.queue.poll());
 		} else {
 			this.running = false;
 		}
 	}
 
-	public Answer ask(QueryTask task, long timeout) {
+	public Object ask(QueryTask task, long timeout) {
+		Statistics.getInstance().asked();
 		try {
 			this.lock.lock();
-			final long backupTimeout = this.aqlSystem.getScheduler().getTimeout();
+			final long backupTimeout = this.aqlSystem.getOptions().getTimeout();
 			final long currentTimeout = Math.min(timeout, backupTimeout);
 
 			this.queryBuffer.add(task);
@@ -119,7 +109,8 @@ public class WebScheduler {
 			try {
 				Thread.sleep(Integer.valueOf(Config.getInstance().getProperty(Config.BUFFER_TIME)).intValue());
 			} catch (final InterruptedException e) {
-				Log.error("Scheduler interrupted while buffering requests: " + e.getMessage());
+				de.foellix.aql.webservice.helper.Helper
+						.error("Scheduler interrupted while buffering requests: " + e.getMessage());
 			}
 
 			this.lock.lock();
@@ -133,9 +124,9 @@ public class WebScheduler {
 				}
 				this.queryBuffer.removeAll(removeList);
 				if (this.bufferTimeout <= 0) {
-					this.aqlSystem.getScheduler().setTimeout(Helper.getTimeOutByConfig());
+					this.aqlSystem.getOptions().setTimeout(Helper.getTimeOutByConfig());
 				} else {
-					this.aqlSystem.getScheduler().setTimeout(this.bufferTimeout);
+					this.aqlSystem.getOptions().setTimeout(this.bufferTimeout);
 				}
 				this.bufferTimeout = 0;
 				this.aqlSystem.queryAndWait(sb.toString());
@@ -147,21 +138,24 @@ public class WebScheduler {
 				try {
 					Thread.sleep(1000);
 				} catch (final InterruptedException e) {
-					Log.error("Scheduler interrupted while waiting for buffer to be flushed: " + e.getMessage());
+					de.foellix.aql.webservice.helper.Helper
+							.error("Scheduler interrupted while waiting for buffer to be flushed: " + e.getMessage());
 				}
 			}
 
 			this.lock.lock();
-			this.aqlSystem.getScheduler().setTimeout(this.TIME_TO_LOAD_PRECOMPUTED_ANSWERS);
-			final Answer answer;
-			final Collection<Answer> candidates = this.aqlSystem.queryAndWait(task.getQuery());
+			this.aqlSystem.getOptions().setTimeout(this.TIME_TO_LOAD_PRECOMPUTED_ANSWERS);
+			final Object answer;
+			Log.setSilence(Log.SILENCE_LEVEL_WARNING);
+			final Collection<Object> candidates = this.aqlSystem.queryAndWait(task.getQuery());
+			Log.setSilence(false);
 			if (candidates != null && candidates.iterator().hasNext()) {
 				answer = candidates.iterator().next();
 			} else {
 				answer = new Answer();
 			}
-			if (backupTimeout != this.aqlSystem.getScheduler().getTimeout()) {
-				this.aqlSystem.getScheduler().setTimeout(backupTimeout);
+			if (backupTimeout != this.aqlSystem.getOptions().getTimeout()) {
+				this.aqlSystem.getOptions().setTimeout(backupTimeout);
 			}
 			this.lock.unlock();
 
@@ -176,17 +170,20 @@ public class WebScheduler {
 				}
 			}
 
-			Log.error("While working on\n" + sb.toString() + "an unexpected exception was thrown ("
-					+ e.getClass().getSimpleName() + "): " + e.getMessage());
+			de.foellix.aql.webservice.helper.Helper.error("While working on\n" + sb.toString()
+					+ "an unexpected exception was thrown (" + e.getClass().getSimpleName() + "): " + e.getMessage());
 			e.printStackTrace();
 			return null;
+		} finally {
+			Statistics.getInstance().done();
 		}
 	}
 
 	public File preprocess(PreprocessTask task, long timeout) {
+		Statistics.getInstance().asked();
 		try {
 			this.lock.lock();
-			final long backupTimeout = this.aqlSystem.getScheduler().getTimeout();
+			final long backupTimeout = this.aqlSystem.getOptions().getTimeout();
 			final long currentTimeout = Math.min(timeout, backupTimeout);
 
 			this.pptBuffer.add(task);
@@ -196,7 +193,8 @@ public class WebScheduler {
 			try {
 				Thread.sleep(Integer.valueOf(Config.getInstance().getProperty(Config.BUFFER_TIME)).intValue());
 			} catch (final InterruptedException e) {
-				Log.error("Scheduler interrupted while buffering requests: " + e.getMessage());
+				de.foellix.aql.webservice.helper.Helper
+						.error("Scheduler interrupted while buffering requests: " + e.getMessage());
 			}
 
 			this.lock.lock();
@@ -210,14 +208,14 @@ public class WebScheduler {
 				}
 				this.pptBuffer.removeAll(removeList);
 				if (this.bufferTimeout <= 0) {
-					this.aqlSystem.getScheduler().setTimeout(Helper.getTimeOutByConfig());
+					this.aqlSystem.getOptions().setTimeout(Helper.getTimeOutByConfig());
 				} else {
-					this.aqlSystem.getScheduler().setTimeout(this.bufferTimeout);
+					this.aqlSystem.getOptions().setTimeout(this.bufferTimeout);
 				}
 				this.bufferTimeout = 0;
-				activateFakeTool(true);
+				activateFakeTool(true, task.getKeyword());
 				this.aqlSystem.queryAndWait(sb.toString());
-				activateFakeTool(false);
+				activateFakeTool(false, task.getKeyword());
 				this.flushBuffer = true;
 			}
 			this.lock.unlock();
@@ -226,28 +224,28 @@ public class WebScheduler {
 				try {
 					Thread.sleep(1000);
 				} catch (final InterruptedException e) {
-					Log.error("Scheduler interrupted while waiting for buffer to be flushed: " + e.getMessage());
+					de.foellix.aql.webservice.helper.Helper
+							.error("Scheduler interrupted while waiting for buffer to be flushed: " + e.getMessage());
 				}
 			}
 
 			this.lock.lock();
-			this.aqlSystem.getScheduler().setTimeout(this.TIME_TO_LOAD_PRECOMPUTED_ANSWERS);
-			activateFakeTool(true);
-			final Answer answer;
-			final Collection<Answer> candidates = this.aqlSystem.queryAndWait(task.createQuery());
+			this.aqlSystem.getOptions().setTimeout(this.TIME_TO_LOAD_PRECOMPUTED_ANSWERS);
+			activateFakeTool(true, task.getKeyword());
+			final Object answer;
+			final Collection<Object> candidates = this.aqlSystem.queryAndWait(task.createQuery());
 			if (candidates != null && candidates.iterator().hasNext()) {
 				answer = candidates.iterator().next();
 			} else {
 				answer = new Answer();
 			}
-			activateFakeTool(false);
-			if (backupTimeout != this.aqlSystem.getScheduler().getTimeout()) {
-				this.aqlSystem.getScheduler().setTimeout(backupTimeout);
+			activateFakeTool(false, task.getKeyword());
+			if (backupTimeout != this.aqlSystem.getOptions().getTimeout()) {
+				this.aqlSystem.getOptions().setTimeout(backupTimeout);
 			}
 			this.lock.unlock();
 
-			return new File(
-					answer.getPermissions().getPermission().iterator().next().getReference().getApp().getFile());
+			return (File) answer;
 		} catch (final Exception e) {
 			final StringBuilder sb = new StringBuilder();
 			for (final PreprocessTask t : this.pptBuffer) {
@@ -258,41 +256,28 @@ public class WebScheduler {
 				}
 			}
 
-			Log.error("While working on\n" + sb.toString() + "an unexpected exception was thrown ("
-					+ e.getClass().getSimpleName() + "): " + e.getMessage());
+			de.foellix.aql.webservice.helper.Helper.error("While working on\n" + sb.toString()
+					+ "an unexpected exception was thrown (" + e.getClass().getSimpleName() + "): " + e.getMessage());
 			e.printStackTrace();
 			return null;
+		} finally {
+			Statistics.getInstance().done();
 		}
 	}
 
-	private void activateFakeTool(boolean value) {
+	private void activateFakeTool(boolean value, String keyword) {
 		if (value) {
 			if (!ConfigHandler.getInstance().getConfig().getTools().getTool()
-					.contains(Helper.getFakeToolForPreprocessing())) {
-				ConfigHandler.getInstance().getConfig().getTools().getTool().add(Helper.getFakeToolForPreprocessing());
-
-				if (this.aqlSystem.getTaskHooksBefore().getHooks().get(Helper.getFakeToolForPreprocessing()) == null) {
-					final List<ITaskHook> temp = new ArrayList<>();
-					temp.add(new CreateAnswerFileHook());
-					this.aqlSystem.getTaskHooksBefore().getHooks().put(Helper.getFakeToolForPreprocessing(), temp);
-				}
+					.contains(Helper.getFakeToolForPreprocessing(keyword))) {
+				ConfigHandler.getInstance().getConfig().getTools().getTool()
+						.add(Helper.getFakeToolForPreprocessing(keyword));
 			}
 		} else {
 			if (ConfigHandler.getInstance().getConfig().getTools().getTool()
-					.contains(Helper.getFakeToolForPreprocessing())) {
+					.contains(Helper.getFakeToolForPreprocessing(keyword))) {
 				ConfigHandler.getInstance().getConfig().getTools().getTool()
-						.remove(Helper.getFakeToolForPreprocessing());
+						.remove(Helper.getFakeToolForPreprocessing(keyword));
 			}
-		}
-	}
-
-	public void scheduleTask(QueryTask task) {
-		if (!this.running) {
-			new Thread(() -> {
-				queryNextTask(task);
-			}).start();
-		} else {
-			this.queue.add(task);
 		}
 	}
 
@@ -306,5 +291,14 @@ public class WebScheduler {
 			}
 		}
 		return null;
+	}
+
+	public String getRunningTasks() {
+		if (this.aqlSystem == null || this.aqlSystem.getTaskScheduler() == null
+				|| this.aqlSystem.getTaskScheduler().getTaskTree() == null) {
+			return "None";
+		} else {
+			return this.aqlSystem.getTaskScheduler().getTaskTree().toString();
+		}
 	}
 }

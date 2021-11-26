@@ -12,9 +12,10 @@ import java.util.Scanner;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import org.fusesource.jansi.AnsiConsole;
 import org.glassfish.grizzly.http.server.HttpServer;
 import org.glassfish.grizzly.nio.transport.TCPNIOTransport;
+import org.glassfish.grizzly.ssl.SSLContextConfigurator;
+import org.glassfish.grizzly.ssl.SSLEngineConfigurator;
 import org.glassfish.grizzly.threadpool.ThreadPoolConfig;
 import org.glassfish.jersey.grizzly2.httpserver.GrizzlyHttpServerFactory;
 import org.glassfish.jersey.server.ResourceConfig;
@@ -23,33 +24,38 @@ import org.glassfish.jersey.server.ServerProperties;
 import de.foellix.aql.Log;
 import de.foellix.aql.Properties;
 import de.foellix.aql.config.ConfigHandler;
+import de.foellix.aql.helper.CLIHelper;
+import de.foellix.aql.helper.FileHelper;
 import de.foellix.aql.helper.Helper;
 import de.foellix.aql.system.BackupAndReset;
+import de.foellix.aql.system.storage.Storage;
+import de.foellix.aql.webservice.config.Account;
+import de.foellix.aql.webservice.config.Accounts;
 import de.foellix.aql.webservice.config.Config;
+import de.foellix.aql.webservice.scheduler.Statistics;
+import de.foellix.aql.webservice.scheduler.WebScheduler;
 
 public class WebService {
-	public static String URL = "http://0.0.0.0:8080/AQL-WebService/";
+	public static String url;
 
 	private static final String CMD_EXIT = "exit";
 	private static final String CMD_QUIT = "quit";
 	private static final String CMD_HELP = "help";
 	private static final String CMD_INFO = "info";
-	private static final String CMD_SAVE = "save";
-	private static final String CMD_CHANGE_PORT = "change port";
-	private static final String CMD_CHANGE_USERNAME = "change username";
-	private static final String CMD_CHANGE_PASSWORD = "change password";
+	private static final String CMD_USER = "user";
+	private static final String CMD_PORT = "port";
 	private static final String CMD_BACKUP = "backup";
 	private static final String CMD_RESET = "reset";
 	private static final String CMD_TOOLS = "tools";
+	private static final String CMD_ACCOUNTS = "accounts";
+	private static final String CMD_TASKS = "tasks";
 
-	public static void main(String[] args) throws IOException {
+	public static void main(String[] args) {
 		// Initialize
-		URL = "http://0.0.0.0:" + Config.getInstance().getProperty(Config.PORT) + "/AQL-WebService/";
 		Properties.info().ABBREVIATION = "AQL-WebService";
 		Log.setDifferentLogFile(new File(Config.getInstance().getProperty(Config.LOG_FILE)));
 		Log.setShorten(true);
 
-		AnsiConsole.systemInstall();
 		final String authorStr = "Author: " + Properties.info().AUTHOR + " (" + Properties.info().AUTHOR_EMAIL + ")";
 		final String space = "               ".substring(Math.min(Properties.info().VERSION.length() + 3, 15));
 		final String centerspace = "                                        "
@@ -65,7 +71,19 @@ public class WebService {
 						+ "/_/    \\_\\___\\_\\______|    \\/  \\/ \\___|_.__/_____/ \\___|_|    \\_/ |_|\\___\\___|\r\n")
 				.reset().a("\r\n" + centerspace + authorStr + "\r\n"), Log.NORMAL);
 
+		// Initialize Statistics
+		Statistics.getInstance();
+
+		// Setup file system
+		FileHelper.setTempDirectory(new File(Config.getInstance().getProperty(Config.TEMP_PATH)));
+		FileHelper.setConverterDirectory(new File(Config.getInstance().getProperty(Config.CONVERTER_PATH)));
+		FileHelper.setAnswersDirectory(new File(Config.getInstance().getProperty(Config.ANSWERS_PATH)));
+		final File newStorage = new File(Config.getInstance().getProperty(Config.STORAGE_PATH));
+		newStorage.mkdirs();
+		Storage.getInstance().setStorageDirectory(newStorage);
+
 		// Parse launch parameters
+		boolean firstConfig = true;
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].equals("-b") || args[i].equals("-backup")) {
 				BackupAndReset.backup(new File(Config.getInstance().getProperty(Config.STORAGE_PATH)));
@@ -73,32 +91,21 @@ public class WebService {
 		}
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].equals("-c") || args[i].equals("-cfg") || args[i].equals("-config")) {
-				ConfigHandler.getInstance().setConfig(new File(args[i + 1]));
-				i++;
+				if (firstConfig) {
+					CLIHelper.evaluateConfig(args[++i]);
+					firstConfig = false;
+				} else {
+					final File oldConfig = ConfigHandler.getInstance().getConfigFile();
+					CLIHelper.evaluateConfig(args[++i]);
+					ConfigHandler.getInstance().mergeWith(oldConfig);
+				}
+			} else if (args[i].equals("-rules")) {
+				CLIHelper.evaluateRules(args[i + 1]);
 			} else if (args[i].equals("-r") || args[i].equals("-re") || args[i].equals("-reset")) {
 				BackupAndReset.reset(new File(Config.getInstance().getProperty(Config.STORAGE_PATH)));
 				reset();
 			} else if (args[i].equals("-d") || args[i].equals("-debug") || args[i].equals("-reset")) {
-				final String debug = args[i + 1];
-				if (debug.equals("normal")) {
-					Log.setLogLevel(Log.NORMAL);
-				} else if (debug.equals("short")) {
-					Log.setLogLevel(Log.NORMAL);
-					Log.setShorten(true);
-				} else if (debug.equals("warning")) {
-					Log.setLogLevel(Log.WARNING);
-				} else if (debug.equals("error")) {
-					Log.setLogLevel(Log.ERROR);
-				} else if (debug.equals("debug")) {
-					Log.setLogLevel(Log.DEBUG);
-				} else if (debug.equals("detailed")) {
-					Log.setLogLevel(Log.DEBUG_DETAILED);
-				} else if (debug.equals("special")) {
-					Log.setLogLevel(Log.DEBUG_SPECIAL);
-				} else {
-					Log.setLogLevel(Integer.valueOf(debug).intValue());
-				}
-				i++;
+				CLIHelper.evaluateLogLevel(args[++i]);
 			}
 		}
 
@@ -110,61 +117,67 @@ public class WebService {
 		try (Scanner sc = new Scanner(System.in)) {
 			String read;
 			do {
-				Log.msg("> ", Log.NORMAL, false);
+				de.foellix.aql.webservice.helper.Helper.newLine();
 				read = sc.nextLine();
 				if (read.equals(CMD_HELP)) {
-					Log.msg("\nAvailable commands:\n0. " + CMD_EXIT + " or " + CMD_QUIT
-							+ " (to stop the web service)\n1. " + CMD_CHANGE_PORT
-							+ " %PORT% (e.g. \"change port 8081\")\n2. " + CMD_CHANGE_USERNAME
-							+ " %USERNAME% (e.g. \"change username aqlUser\")\n3. " + CMD_CHANGE_PASSWORD
-							+ " %PASSWORD% (e.g. \"change password S3cR3T!\")\n4. " + CMD_SAVE
-							+ " (stores the current settings in the \"config.properties\" file)\n5. " + CMD_INFO
-							+ " (shows some basic information)\n6. " + CMD_BACKUP
-							+ " (backups the underlying AQL-System's storage)\n7. " + CMD_RESET
-							+ " (resets the underlying AQL-System)\n8. " + CMD_TOOLS
-							+ " (shows a list of all tools in the current config)\n", Log.NORMAL);
+					Log.msg("\nAvailable commands:\n- " + CMD_EXIT + " or " + CMD_QUIT
+							+ " (to stop the web service)\n- " + CMD_USER
+							+ " %NAME% %PASSWORD% (e.g. \"user FoelliX password123\")\n- " + CMD_PORT
+							+ " %PORT% (e.g. \"port 8081\")\n- " + CMD_INFO + " (shows some basic information)\n- "
+							+ CMD_BACKUP + " (backups the underlying AQL-System's storage)\n- " + CMD_RESET
+							+ " (resets the underlying AQL-System)\n- " + CMD_TOOLS
+							+ " (shows a list of all tools in the current config)\n- " + CMD_ACCOUNTS
+							+ " (shows a table of all accounts)\n- " + CMD_TASKS
+							+ " (shows the currently running tasks)", Log.NORMAL);
 				} else if (read.equals(CMD_INFO)) {
 					Log.msg(info(), Log.NORMAL);
-				} else if (read.equals(CMD_SAVE)) {
-					Config.getInstance().store();
-					Log.msg("Current settings saved!", Log.NORMAL);
-				} else if (read.startsWith(CMD_CHANGE_PORT)) {
+				} else if (read.startsWith(CMD_USER)) {
+					final String[] parts = read.split(" ");
+					if (parts.length == 3) {
+						Accounts.getInstance().addAccount(new Account(parts[1], parts[2]));
+						Accounts.getInstance().store();
+						Log.msg("Account created! Please finish configuring it in the \"accounts.csv\" file.",
+								Log.NORMAL);
+					} else {
+						Log.warning("User not created! Invalid command!");
+					}
+				} else if (read.startsWith(CMD_PORT)) {
 					server.shutdownNow();
-					final String port = read.replaceAll(CMD_CHANGE_PORT, "").replaceAll(" ", "");
+					final String port = read.replaceAll(CMD_PORT, "").replaceAll(" ", "");
 					Config.getInstance().getProperties().setProperty(Config.PORT, port);
-					server = startServer(port);
+					server = startServer();
 					Log.msg("Port changed to: " + port, Log.NORMAL);
-				} else if (read.startsWith(CMD_CHANGE_USERNAME)) {
-					final String username = read.replaceAll(CMD_CHANGE_USERNAME, "").replaceAll(" ", "");
-					Config.getInstance().getProperties().setProperty(Config.USERNAME, username);
-					Log.msg("Username changed to: " + username, Log.NORMAL);
-				} else if (read.startsWith(CMD_CHANGE_PASSWORD)) {
-					final String password = read.replaceAll(CMD_CHANGE_PASSWORD, "").replaceAll(" ", "");
-					Config.getInstance().getProperties().setProperty(Config.PASSWORD, password);
-					Log.msg("Password changed to: " + password, Log.NORMAL);
 				} else if (read.equals(CMD_BACKUP)) {
 					BackupAndReset.backup(new File(Config.getInstance().getProperty(Config.STORAGE_PATH)));
 				} else if (read.equals(CMD_RESET)) {
 					BackupAndReset.reset(new File(Config.getInstance().getProperty(Config.STORAGE_PATH)));
 				} else if (read.equals(CMD_TOOLS)) {
 					Log.msg(tools(), Log.NORMAL);
+				} else if (read.equals(CMD_ACCOUNTS)) {
+					Log.msg(Accounts.getInstance().toString().replace(",", ", "), Log.NORMAL);
+				} else if (read.equals(CMD_TASKS)) {
+					Log.msg(WebScheduler.getInstance().getRunningTasks(), Log.NORMAL);
 				} else if (!(read.equals(CMD_EXIT) || read.equals(CMD_QUIT))) {
 					Log.msg("Unknown command: " + read + " (Type \"" + CMD_HELP
 							+ "\" to see a list of available commands)", Log.NORMAL);
 				}
 			} while (!(read.equals(CMD_EXIT) || read.equals(CMD_QUIT)));
 		} catch (final Exception e) {
-			Log.error("Web service unexpectedly stopped! (" + e.getMessage() + ")");
+			de.foellix.aql.webservice.helper.Helper.error("Web service unexpectedly stopped! (" + e.getMessage() + ")");
 		}
 
 		// Stop server
-		server.shutdownNow();
+		server.shutdown();
 		Log.msg("Webservice stopped!", Log.NORMAL);
+	}
+
+	private static void initUrl(String port) {
+		url = "http://0.0.0.0:" + port + "/AQL-WebService";
 	}
 
 	private static void reset() {
 		final File uploadFolder = new File(Config.getInstance().getProperty(Config.UPLOAD_PATH));
-		final boolean failed = de.foellix.aql.webservice.helper.Helper.deleteFolder(uploadFolder);
+		final boolean failed = FileHelper.deleteDir(uploadFolder);
 		if (failed) {
 			Log.msg("Successfully deleted upload directory!", Log.NORMAL);
 		} else {
@@ -177,34 +190,37 @@ public class WebService {
 	}
 
 	private static String info() {
-		return "\nListening on port " + Config.getInstance().getProperty(Config.PORT) + "\n(" + URL + ")\n\nUsername: "
-				+ Config.getInstance().getProperty(Config.USERNAME) + "\nPassword: "
-				+ Config.getInstance().getProperty(Config.PASSWORD) + "\n\nConfig: "
+		String remoteUrl;
+		try {
+			final String ip = de.foellix.aql.webservice.helper.Helper.getIp();
+			remoteUrl = "http://" + ip + ":" + Config.getInstance().getProperty(Config.PORT) + "/AQL-WebService";
+		} catch (final IOException e) {
+			remoteUrl = "Could not be fetched";
+		}
+		final String localUrl = "http://localhost:" + Config.getInstance().getProperty(Config.PORT) + "/AQL-WebService";
+
+		return "\nListening on port " + Config.getInstance().getProperty(Config.PORT) + "\nURLs:\n\t- Local: "
+				+ localUrl + ",\n\t- Remote: " + remoteUrl + "\n\nConfig: "
 				+ ConfigHandler.getInstance().getConfigFile().getAbsolutePath() + "\n";
 	}
 
 	private static String tools() {
 		return (ConfigHandler.getInstance().getConfig().getTools() != null
-				? "\nToollists: " + Helper.toString(ConfigHandler.getInstance().getConfig().getTools().getTool()) + "\n"
+				? "\n*** Tools ***\n" + Helper.toString(ConfigHandler.getInstance().getConfig().getTools().getTool())
+						+ "\n"
 				: "")
-				+ (ConfigHandler.getInstance().getConfig().getPreprocessors() != null ? "\nProprocessors: "
+				+ (ConfigHandler.getInstance().getConfig().getPreprocessors() != null ? "\n*** Proprocessors ***\n"
 						+ Helper.toString(ConfigHandler.getInstance().getConfig().getPreprocessors().getTool()) + "\n"
 						: "")
-				+ (ConfigHandler.getInstance().getConfig().getOperators() != null ? "\nOperators: "
+				+ (ConfigHandler.getInstance().getConfig().getOperators() != null ? "\n*** Operators ***\n"
 						+ Helper.toString(ConfigHandler.getInstance().getConfig().getOperators().getTool()) + "\n" : "")
-				+ (ConfigHandler.getInstance().getConfig().getConverters() != null ? "\nConverters: "
+				+ (ConfigHandler.getInstance().getConfig().getConverters() != null ? "\n*** Converters ***\n"
 						+ Helper.toString(ConfigHandler.getInstance().getConfig().getConverters().getTool()) + "\n"
 						: "");
 	}
 
 	public static HttpServer startServer() {
-		return startServer(null);
-	}
-
-	public static HttpServer startServer(String port) {
-		if (port != null) {
-			URL = "http://0.0.0.0:" + port + "/AQL-WebService/";
-		}
+		initUrl(Config.getInstance().getProperty(Config.PORT));
 
 		final ResourceConfig rc = new ResourceConfig();
 		final Map<String, Object> initParams = new HashMap<>();
@@ -215,7 +231,18 @@ public class WebService {
 			Logger.getLogger("org.glassfish").setLevel(Level.OFF);
 		}
 
-		final HttpServer grizzly = GrizzlyHttpServerFactory.createHttpServer(URI.create(URL), rc, false);
+		final HttpServer grizzly;
+		if (sslActive()) {
+			final SSLContextConfigurator ssl = new SSLContextConfigurator();
+			ssl.setKeyStoreFile(Config.getInstance().getProperty(Config.KEYSTORE_PATH));
+			ssl.setKeyStorePass(Config.getInstance().getProperty(Config.KEYSTORE_PASS));
+			ssl.setTrustStoreFile(Config.getInstance().getProperty(Config.TRUSTSTORE_PATH));
+			ssl.setTrustStorePass(Config.getInstance().getProperty(Config.TRUSTSTORE_PASS));
+			grizzly = GrizzlyHttpServerFactory.createHttpServer(URI.create(url), rc, true,
+					new SSLEngineConfigurator(ssl).setClientMode(false).setNeedClientAuth(false), false);
+		} else {
+			grizzly = GrizzlyHttpServerFactory.createHttpServer(URI.create(url), rc, false);
+		}
 
 		final TCPNIOTransport transport = grizzly.getListener("grizzly").getTransport();
 		final ThreadPoolConfig config = ThreadPoolConfig.defaultConfig().setCorePoolSize(128).setMaxPoolSize(128)
@@ -229,5 +256,21 @@ public class WebService {
 		}
 
 		return grizzly;
+	}
+
+	private static boolean sslActive() {
+		if (Config.getInstance().getProperty(Config.KEYSTORE_PATH) != null
+				&& !Config.getInstance().getProperty(Config.KEYSTORE_PATH).isEmpty()
+				&& Config.getInstance().getProperty(Config.KEYSTORE_PASS) != null
+				&& Config.getInstance().getProperty(Config.TRUSTSTORE_PATH) != null
+				&& !Config.getInstance().getProperty(Config.TRUSTSTORE_PATH).isEmpty()
+				&& Config.getInstance().getProperty(Config.TRUSTSTORE_PASS) != null) {
+			final File keystore = new File(Config.getInstance().getProperty(Config.KEYSTORE_PATH));
+			final File truststore = new File(Config.getInstance().getProperty(Config.TRUSTSTORE_PATH));
+			if (keystore.exists() && truststore.exists()) {
+				return true;
+			}
+		}
+		return false;
 	}
 }
